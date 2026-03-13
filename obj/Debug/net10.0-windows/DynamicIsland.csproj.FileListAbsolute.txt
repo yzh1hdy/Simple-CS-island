@@ -1,0 +1,14 @@
+D:\Visual Studio\01\DynamicIsland\bin\Debug\net10.0-windows\DynamicIsland.exe
+D:\Visual Studio\01\DynamicIsland\bin\Debug\net10.0-windows\DynamicIsland.deps.json
+D:\Visual Studio\01\DynamicIsland\bin\Debug\net10.0-windows\DynamicIsland.runtimeconfig.json
+D:\Visual Studio\01\DynamicIsland\bin\Debug\net10.0-windows\DynamicIsland.dll
+D:\Visual Studio\01\DynamicIsland\bin\Debug\net10.0-windows\DynamicIsland.pdb
+D:\Visual Studio\01\DynamicIsland\obj\Debug\net10.0-windows\DynamicIsland.GeneratedMSBuildEditorConfig.editorconfig
+D:\Visual Studio\01\DynamicIsland\obj\Debug\net10.0-windows\DynamicIsland.AssemblyInfoInputs.cache
+D:\Visual Studio\01\DynamicIsland\obj\Debug\net10.0-windows\DynamicIsland.AssemblyInfo.cs
+D:\Visual Studio\01\DynamicIsland\obj\Debug\net10.0-windows\DynamicIsland.csproj.CoreCompileInputs.cache
+D:\Visual Studio\01\DynamicIsland\obj\Debug\net10.0-windows\DynamicIsland.dll
+D:\Visual Studio\01\DynamicIsland\obj\Debug\net10.0-windows\refint\DynamicIsland.dll
+D:\Visual Studio\01\DynamicIsland\obj\Debug\net10.0-windows\DynamicIsland.pdb
+D:\Visual Studio\01\DynamicIsland\obj\Debug\net10.0-windows\DynamicIsland.genruntimeconfig.cache
+D:\Visual Studio\01\DynamicIsland\obj\Debug\net10.0-windows\ref\DynamicIsland.dll
