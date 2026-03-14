@@ -1,11 +1,14 @@
-using System;
-using System.Drawing;
+// Form1.cs
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.Linq;
+using System;
+using System.Management;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
-using System.Threading;
-using System.Windows.Forms;
-using Timer = System.Windows.Forms.Timer;
+using System.Text.RegularExpressions;
 
 namespace DynamicIsland
 {
@@ -60,6 +63,30 @@ namespace DynamicIsland
 
     public class Form1 : Form
     {
+        // DPI 感知 API
+        [DllImport("shcore.dll")]
+        private static extern int SetProcessDpiAwareness(int awareness);
+
+        [DllImport("user32.dll")]
+        private static extern bool SetProcessDPIAware();
+
+        // 静态构造函数，在类首次使用时执行，设置 DPI 感知
+        static Form1()
+        {
+            try
+            {
+                SetProcessDpiAwareness(2); // Per-Monitor DPI Aware
+            }
+            catch
+            {
+                try
+                {
+                    SetProcessDPIAware();
+                }
+                catch { }
+            }
+        }
+
         [DllImport("user32.dll", ExactSpelling = true, SetLastError = true)]
         private static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst,
             ref Win32Point pptDst, ref Size psize, IntPtr hdcSrc, ref Win32Point pptSrc,
@@ -101,12 +128,6 @@ namespace DynamicIsland
 
         [DllImport("user32.dll")]
         private static extern bool TrackMouseEvent(ref TRACKMOUSEEVENT lpEventTrack);
-
-        [DllImport("user32.dll")]
-        private static extern bool SetProcessDPIAware();
-
-        [DllImport("shcore.dll")]
-        private static extern int SetProcessDpiAwareness(int awareness);
 
         [DllImport("user32.dll")]
         private static extern int GetDpiForWindow(IntPtr hwnd);
@@ -218,7 +239,7 @@ namespace DynamicIsland
 
         private bool _mouseTracking = false;
         private bool _mouseInside = false;
-        private Timer _mousePollingTimer;
+        private System.Windows.Forms.Timer _mousePollingTimer;
 
         private Font _timeFont;
         private Font _dateFont;
@@ -239,24 +260,24 @@ namespace DynamicIsland
 
         private ContentItem _currentContent;
         private ContentItem _nextContent;
-        private Timer _autoPopupTimer;
+        private System.Windows.Forms.Timer _autoPopupTimer;
         private bool _isAutoPopupActive = false;
+
+        // 硬件监控相关
+        private System.Threading.Timer _hardwareMonitorTimer;
+        private bool _wasOnline = false;
+        private string _lastSSID = null;
+        private HashSet<string> _lastBluetoothDevices = new HashSet<string>();
+        private readonly object _hardwareLock = new object();
 
         public Form1()
         {
-            InitializeDpiAwareness();
             CalculateScaledSizes();
             _currentWidth = IslandWidth;
             _currentHeight = IslandHeight;
             _targetWidth = IslandWidth;
             _targetHeight = IslandHeight;
             InitializeComponent();
-        }
-
-        private void InitializeDpiAwareness()
-        {
-            try { SetProcessDpiAwareness(2); }
-            catch { try { SetProcessDPIAware(); } catch { } }
         }
 
         private float GetDpiScale()
@@ -315,7 +336,7 @@ namespace DynamicIsland
 
             _notifyIcon = new NotifyIcon
             {
-                Text = "Dynamic Island",
+                Text = "Csharp Island",
                 Visible = true,
                 ContextMenuStrip = _contextMenu
             };
@@ -333,36 +354,27 @@ namespace DynamicIsland
 
         private void ExitMenuItem_Click(object sender, EventArgs e)
         {
-            // 先标记退出状态，防止重复触发
             if (_isExiting) return;
             _isExiting = true;
 
-            // 使用 BeginInvoke 延迟执行退出，确保上下文菜单先关闭
             this.BeginInvoke(new Action(() =>
             {
                 try
                 {
-                    // 先隐藏托盘图标，再清理资源
                     if (_notifyIcon != null)
                     {
                         _notifyIcon.Visible = false;
                     }
-
-                    // 清理其他资源
                     CleanupResources();
-
-                    // 退出应用
                     Application.Exit();
                 }
                 catch (Exception ex)
                 {
-                    // 如果出错，强制退出
                     Environment.Exit(0);
                 }
             }));
         }
 
-        // 集中清理资源
         private void CleanupResources()
         {
             _renderTimer?.Dispose();
@@ -371,6 +383,7 @@ namespace DynamicIsland
             _mousePollingTimer?.Dispose();
             _autoPopupTimer?.Stop();
             _autoPopupTimer?.Dispose();
+            _hardwareMonitorTimer?.Dispose();
 
             _currentContent = null;
             _nextContent = null;
@@ -390,6 +403,184 @@ namespace DynamicIsland
             }
             _contextMenu?.Dispose();
         }
+
+        // ==================== 硬件监控功能 ====================
+
+        /// <summary>
+        /// 检查互联网连接状态
+        /// </summary>
+        private bool CheckInternetConnection()
+        {
+            try
+            {
+                using (var client = new TcpClient())
+                {
+                    client.Connect("8.8.8.8", 53);
+                    return true;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 获取当前WiFi SSID
+        /// </summary>
+        private string GetWifiSSID()
+        {
+            try
+            {
+                var process = new Process
+                {
+                    StartInfo = new ProcessStartInfo
+                    {
+                        FileName = "netsh",
+                        Arguments = "wlan show interfaces",
+                        RedirectStandardOutput = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        StandardOutputEncoding = System.Text.Encoding.UTF8
+                    }
+                };
+                process.Start();
+                string output = process.StandardOutput.ReadToEnd();
+                process.WaitForExit();
+
+                // 解析SSID
+                var match = Regex.Match(output, @"SSID\s*:\s*(.+?)\r?\n");
+                if (match.Success)
+                {
+                    return match.Groups[1].Value.Trim();
+                }
+                return null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// 获取已连接的蓝牙设备
+        /// </summary>
+        private HashSet<string> GetBluetoothDevices()
+        {
+            var devices = new HashSet<string>();
+            try
+            {
+                // 使用WMI查询蓝牙设备
+                using (var searcher = new ManagementObjectSearcher(
+                    "SELECT * FROM Win32_PnPEntity WHERE ClassGuid='{e0cbf06c-cd8b-4647-bb8a-263b43f0f974}'"))
+                {
+                    foreach (ManagementObject obj in searcher.Get())
+                    {
+                        string status = obj["Status"]?.ToString();
+                        string name = obj["Name"]?.ToString();
+
+                        if (status == "OK" && !string.IsNullOrEmpty(name))
+                        {
+                            // 排除蓝牙适配器本身
+                            string[] excludeKeywords = { "Enumerator", "枚举器", "Adapter", "适配器", "Radio", "无线电" };
+                            if (!excludeKeywords.Any(k => name.Contains(k)))
+                            {
+                                devices.Add(name);
+                            }
+                        }
+                    }
+                }
+
+                // 备用方案：使用PowerShell获取更详细的蓝牙信息
+                if (devices.Count == 0)
+                {
+                    try
+                    {
+                        var psProcess = new Process
+                        {
+                            StartInfo = new ProcessStartInfo
+                            {
+                                FileName = "powershell",
+                                Arguments = "-Command \"Get-PnpDevice -Class Bluetooth | Where-Object {$_.Status -eq 'OK'} | Select-Object -ExpandProperty FriendlyName\"",
+                                RedirectStandardOutput = true,
+                                UseShellExecute = false,
+                                CreateNoWindow = true,
+                                StandardOutputEncoding = System.Text.Encoding.UTF8
+                            }
+                        };
+                        psProcess.Start();
+                        string output = psProcess.StandardOutput.ReadToEnd();
+                        psProcess.WaitForExit();
+
+                        var lines = output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                        foreach (var line in lines)
+                        {
+                            string name = line.Trim();
+                            if (!string.IsNullOrEmpty(name))
+                            {
+                                string[] excludeKeywords = { "Enumerator", "枚举器", "Adapter", "适配器", "Radio", "无线电" };
+                                if (!excludeKeywords.Any(k => name.Contains(k)))
+                                {
+                                    devices.Add(name);
+                                }
+                            }
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return devices;
+        }
+
+        /// <summary>
+        /// 硬件监控主循环
+        /// </summary>
+        private void HardwareMonitorLoop(object state)
+        {
+            try
+            {
+                // 网络检测
+                bool isOnline = CheckInternetConnection();
+                string currentSSID = GetWifiSSID();
+
+                lock (_hardwareLock)
+                {
+                    // 网络状态变化检测
+                    if (isOnline)
+                    {
+                        if (!_wasOnline)
+                        {
+                            // 从离线变为在线
+                            string msg = !string.IsNullOrEmpty(currentSSID) ? $"{currentSSID}" : "网络已连接";
+                            ShowNotification(msg, TimeSpan.FromSeconds(3));
+                        }
+                        else if (!string.IsNullOrEmpty(currentSSID) && currentSSID != _lastSSID)
+                        {
+                            // WiFi切换
+                            ShowNotification($"{currentSSID}", TimeSpan.FromSeconds(3));
+                        }
+                    }
+
+                    _wasOnline = isOnline;
+                    _lastSSID = currentSSID;
+
+                    // 蓝牙检测
+                    var currentBTDevices = GetBluetoothDevices();
+                    var newDevices = currentBTDevices.Except(_lastBluetoothDevices).ToList();
+
+                    foreach (var device in newDevices)
+                    {
+                        ShowNotification($"蓝牙[{device}]已连接", TimeSpan.FromSeconds(3));
+                    }
+
+                    _lastBluetoothDevices = currentBTDevices;
+                }
+            }
+            catch { }
+        }
+
+        // ==================== 窗口生命周期 ====================
 
         private void Form1_Load(object sender, EventArgs e)
         {
@@ -420,7 +611,7 @@ namespace DynamicIsland
                 Duration = TimeSpan.Zero
             };
 
-            _mousePollingTimer = new Timer { Interval = 8 };
+            _mousePollingTimer = new System.Windows.Forms.Timer { Interval = 8 };
             _mousePollingTimer.Tick += MousePollingTimer_Tick;
             _mousePollingTimer.Start();
 
@@ -428,6 +619,14 @@ namespace DynamicIsland
             _renderTimer = new System.Threading.Timer(RenderTick, null, 0, 8);
 
             _topmostTimer = new System.Threading.Timer(EnsureSuperTopMost, null, 0, 100);
+
+            // 初始化硬件监控
+            _wasOnline = CheckInternetConnection();
+            _lastSSID = GetWifiSSID();
+            _lastBluetoothDevices = GetBluetoothDevices();
+
+            // 每4秒检查一次硬件状态
+            _hardwareMonitorTimer = new System.Threading.Timer(HardwareMonitorLoop, null, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(4));
 
             ShowStartupNotification();
             RequestRender();
@@ -467,7 +666,7 @@ namespace DynamicIsland
 
             var startupItem = new ContentItem
             {
-                Text = "灵动岛已启动",
+                Text = "C#灵动岛已启动",
                 Font = _notificationFont,
                 Color = Color.White,
                 TargetScale = 1.0f,
@@ -479,7 +678,7 @@ namespace DynamicIsland
 
             TransitionToContent(startupItem);
 
-            _autoPopupTimer = new Timer { Interval = 2000 };
+            _autoPopupTimer = new System.Windows.Forms.Timer { Interval = 2000 };
             _autoPopupTimer.Tick += (s, e) =>
             {
                 _autoPopupTimer.Stop();
@@ -534,7 +733,7 @@ namespace DynamicIsland
             {
                 _autoPopupTimer?.Stop();
                 _autoPopupTimer?.Dispose();
-                _autoPopupTimer = new Timer { Interval = (int)duration.TotalMilliseconds };
+                _autoPopupTimer = new System.Windows.Forms.Timer { Interval = (int)duration.TotalMilliseconds };
                 _autoPopupTimer.Tick += (s, e) =>
                 {
                     _autoPopupTimer.Stop();
@@ -953,7 +1152,6 @@ namespace DynamicIsland
                 return;
             }
 
-            // 如果正在退出，执行清理
             CleanupResources();
             base.OnFormClosing(e);
         }
