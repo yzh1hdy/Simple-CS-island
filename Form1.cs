@@ -1,5 +1,4 @@
-// Form1.cs - 这个文件曾经由AI修改过，可能留下奇怪的注释，尤其是UI部分
-//反正不影响运行就行了
+// Form1.cs - 修复搜索框输入法问题 - 使用独立输入窗口方案
 
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -104,17 +103,20 @@ namespace DynamicIsland
         private DateTime _musicModeStartTime;
         private bool _altKeyPressed = false;
 
-        // 搜索模式 - 使用可见的透明文本框
+        // 搜索模式 - 使用自定义绘制而非真实 TextBox
         private bool _isSearchMode = false;
         private string _searchText = "";
         private RectangleF _searchBoxRect;
         private RectangleF _searchIconRect;
-        private TextBox _searchTextBox;  // 改为可见的透明文本框
         private DateTime _lastSearchTime = DateTime.MinValue;
         private readonly TimeSpan _searchDebounce = TimeSpan.FromMilliseconds(300);
         private System.Windows.Forms.Timer _cursorTimer;
         private bool _cursorVisible = true;
         private int _cursorPosition = 0;
+
+        // IMM (输入法管理器) 相关
+        private IntPtr _imcHandle = IntPtr.Zero;
+        private bool _immEnabled = false;
 
         private WindowsMediaPlayer _mediaPlayer;
         private string _currentAudioFilePath = "";
@@ -136,6 +138,55 @@ namespace DynamicIsland
         private readonly float[] _freqBands = new float[9] { 20, 60, 150, 400, 1000, 2500, 6000, 15000, 20000 };
 
         private float _timeAnimationProgress = 0f;
+
+        // 窗口位置固定，不受第三方软件影响
+        private Point _fixedWindowPosition;
+
+        // IMM API 声明
+        [DllImport("imm32.dll")]
+        private static extern IntPtr ImmGetContext(IntPtr hWnd);
+
+        [DllImport("imm32.dll")]
+        private static extern bool ImmReleaseContext(IntPtr hWnd, IntPtr hIMC);
+
+        [DllImport("imm32.dll")]
+        private static extern bool ImmSetCompositionWindow(IntPtr hIMC, ref COMPOSITIONFORM lpCompForm);
+
+        [DllImport("imm32.dll")]
+        private static extern bool ImmSetCandidateWindow(IntPtr hIMC, ref CANDIDATEFORM lpCandidate);
+
+        [DllImport("imm32.dll")]
+        private static extern bool ImmAssociateContext(IntPtr hWnd, IntPtr hIMC);
+
+        [DllImport("imm32.dll")]
+        private static extern IntPtr ImmCreateContext();
+
+        [DllImport("imm32.dll")]
+        private static extern bool ImmDestroyContext(IntPtr hIMC);
+
+        [DllImport("imm32.dll")]
+        private static extern bool ImmSetOpenStatus(IntPtr hIMC, bool fOpen);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct COMPOSITIONFORM
+        {
+            public uint dwStyle;
+            public int x;
+            public int y;
+            public int dxWidth;
+            public int dyHeight;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct CANDIDATEFORM
+        {
+            public uint dwIndex;
+            public uint dwStyle;
+            public int x;
+            public int y;
+            public int dxWidth;
+            public int dyHeight;
+        }
 
         [DllImport("shcore.dll")]
         private static extern int SetProcessDpiAwareness(int awareness);
@@ -477,8 +528,12 @@ namespace DynamicIsland
             this.Text = "Dynamic Island";
             this.Size = new Size(WindowWidth, WindowHeight);
             this.StartPosition = FormStartPosition.Manual;
-            var screen = Screen.PrimaryScreen.WorkingArea;
-            this.Location = new Point((screen.Width - WindowWidth) / 2, 0);
+
+            // 使用 Bounds 替代 WorkingArea，避免受第三方软件影响
+            var screen = Screen.PrimaryScreen.Bounds;
+            _fixedWindowPosition = new Point((screen.Width - WindowWidth) / 2, 0);
+            this.Location = _fixedWindowPosition;
+
             this.FormBorderStyle = FormBorderStyle.None;
             this.ShowInTaskbar = false;
             this.AllowDrop = true;
@@ -523,14 +578,6 @@ namespace DynamicIsland
             this.KeyPress += Form1_KeyPress;
             this.KeyPreview = true;
 
-            InitializeSearchTextBox();
-        }
-
-        private void InitializeSearchTextBox()
-        {
-            // 不再创建真实的 TextBox 控件，改用自定义绘制
-            // 所有输入通过 Form 的 KeyPress/KeyDown 事件处理
-
             _cursorTimer = new System.Windows.Forms.Timer { Interval = 530 };
             _cursorTimer.Tick += (s, e) =>
             {
@@ -541,7 +588,6 @@ namespace DynamicIsland
                 }
             };
         }
-
 
         private void InitializeTrayIcon()
         {
@@ -626,7 +672,17 @@ namespace DynamicIsland
 
             _cursorTimer?.Stop();
             _cursorTimer?.Dispose();
-            // 移除 _searchTextBox 的清理，因为已经不再使用 TextBox 控件
+
+            // 清理 IMM 上下文
+            if (_imcHandle != IntPtr.Zero)
+            {
+                try
+                {
+                    ImmDestroyContext(_imcHandle);
+                }
+                catch { }
+                _imcHandle = IntPtr.Zero;
+            }
 
             if (_mediaPlayer != null)
             {
@@ -1783,36 +1839,42 @@ namespace DynamicIsland
             _cursorPosition = 0;
             _cursorVisible = true;
 
-            // 修改窗口样式以允许输入（移除透明和点击穿透，但保留WS_EX_LAYERED）
+            // 修改窗口样式以允许输入
             if (this.IsHandleCreated && !this.IsDisposed)
             {
                 int exStyle = GetWindowLong(this.Handle, GWL_EXSTYLE);
                 // 移除 NOACTIVATE 和 TRANSPARENT，保留 LAYERED
                 int newStyle = (exStyle & ~WS_EX_NOACTIVATE & ~WS_EX_TRANSPARENT) | WS_EX_LAYERED;
                 SetWindowLong(this.Handle, GWL_EXSTYLE, newStyle);
-                // 使用 SWP_SHOWWINDOW 和移除 NOACTIVATE 来确保窗口可以接收输入
                 SetWindowPos(this.Handle, HWND_TOPMOST, 0, 0, 0, 0,
                     SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
             }
 
-            // 激活窗口并设置焦点以支持输入法和键盘输入
+            // 激活窗口并设置输入法
             this.BeginInvoke(new Action(() =>
             {
-                // 强制激活窗口
                 SetForegroundWindow(this.Handle);
                 this.Focus();
                 this.Activate();
 
-                // 创建一个临时的可编辑控件来捕获输入法输入
-                var tempTextBox = new TextBox
+                // 创建并关联输入法上下文
+                try
                 {
-                    Visible = false,
-                    Parent = this
-                };
-                tempTextBox.Focus();
-                tempTextBox.Dispose();
+                    _imcHandle = ImmCreateContext();
+                    if (_imcHandle != IntPtr.Zero)
+                    {
+                        ImmAssociateContext(this.Handle, _imcHandle);
+                        ImmSetOpenStatus(_imcHandle, true);
+                        _immEnabled = true;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"IMM init error: {ex.Message}");
+                }
 
-                this.Focus();
+                // 设置输入法候选框位置
+                UpdateImmPosition();
             }));
 
             _cursorTimer?.Start();
@@ -1821,8 +1883,41 @@ namespace DynamicIsland
             RequestRender();
         }
 
+        private void UpdateImmPosition()
+        {
+            if (!_immEnabled || _imcHandle == IntPtr.Zero) return;
 
-        // ========== 修复：ExitSearchMode 方法 ==========
+            try
+            {
+                // 计算搜索框位置
+                float margin = 20 * _dpiScale;
+                float searchBoxHeight = 32 * _dpiScale;
+                float searchBoxY = IslandTopY + (ExpandedHeight - searchBoxHeight) / 2;
+                float searchBoxWidth = ExpandedWidth - margin * 2;
+                float searchBoxX = (WindowWidth - ExpandedWidth) / 2 + margin;
+
+                // 设置输入法合成窗口位置
+                var compForm = new COMPOSITIONFORM
+                {
+                    dwStyle = 2, // CFS_POINT
+                    x = this.Left + (int)searchBoxX + 10,
+                    y = this.Top + (int)searchBoxY + (int)searchBoxHeight
+                };
+                ImmSetCompositionWindow(_imcHandle, ref compForm);
+
+                // 设置候选窗口位置
+                var candForm = new CANDIDATEFORM
+                {
+                    dwIndex = 0,
+                    dwStyle = 2, // CFS_CANDIDATEPOS
+                    x = this.Left + (int)searchBoxX + 10,
+                    y = this.Top + (int)searchBoxY + (int)searchBoxHeight
+                };
+                ImmSetCandidateWindow(_imcHandle, ref candForm);
+            }
+            catch { }
+        }
+
         private void ExitSearchMode()
         {
             _isSearchMode = false;
@@ -1830,6 +1925,20 @@ namespace DynamicIsland
             _cursorPosition = 0;
 
             _cursorTimer?.Stop();
+
+            // 关闭输入法
+            if (_immEnabled && _imcHandle != IntPtr.Zero)
+            {
+                try
+                {
+                    ImmSetOpenStatus(_imcHandle, false);
+                    ImmAssociateContext(this.Handle, IntPtr.Zero);
+                    ImmDestroyContext(_imcHandle);
+                }
+                catch { }
+                _imcHandle = IntPtr.Zero;
+                _immEnabled = false;
+            }
 
             // 恢复窗口样式
             if (this.IsHandleCreated && !this.IsDisposed)
@@ -1945,10 +2054,11 @@ namespace DynamicIsland
                     return;
                 }
 
-                // 点击搜索框区域，设置焦点到窗体以接收键盘输入
+                // 点击搜索框区域
                 if (_searchBoxRect.Contains(clientPoint.X, clientPoint.Y))
                 {
-                    this.Focus();
+                    // 更新输入法位置
+                    UpdateImmPosition();
                     return;
                 }
                 return;
@@ -2077,28 +2187,22 @@ namespace DynamicIsland
             // 处理字符输入（包括输入法输入的字符）
             if (char.IsControl(e.KeyChar))
             {
-                // 控制字符单独处理
+                // 控制字符在 KeyDown 中处理
                 if (e.KeyChar == (char)Keys.Back)
                 {
                     e.Handled = true;
-                    if (_searchText.Length > 0)
+                    if (_searchText.Length > 0 && _cursorPosition > 0)
                     {
-                        _searchText = _searchText.Substring(0, _searchText.Length - 1);
-                        _cursorPosition = Math.Min(_cursorPosition, _searchText.Length);
+                        _searchText = _searchText.Remove(_cursorPosition - 1, 1);
+                        _cursorPosition--;
                         RequestRender();
                     }
                 }
-                else if (e.KeyChar == (char)Keys.Enter)
+                else if (e.KeyChar == (char)Keys.Enter || e.KeyChar == (char)Keys.Escape)
                 {
                     e.Handled = true;
-                    // 由 KeyDown 处理 Enter
+                    // 由 KeyDown 处理
                 }
-                else if (e.KeyChar == (char)Keys.Escape)
-                {
-                    e.Handled = true;
-                    ExitSearchMode();
-                }
-                // 其他控制字符（如输入法组合键）不处理，保持 e.Handled = false
             }
             else
             {
@@ -2124,6 +2228,12 @@ namespace DynamicIsland
             _targetWidth = expanded ? ExpandedWidth : IslandWidth;
             _targetHeight = expanded ? ExpandedHeight : IslandHeight;
             _isAnimating = true;
+
+            // 更新输入法位置
+            if (_isSearchMode && expanded)
+            {
+                UpdateImmPosition();
+            }
         }
 
         private void UpdateSpringAnimation(float deltaMs)
@@ -2368,7 +2478,6 @@ namespace DynamicIsland
             }
         }
 
-        // ========== 修复：DrawSearchModeContent - 确保 _searchIconRect 在使用前已定义 ==========
         private void DrawSearchModeContent(Graphics g, RectangleF islandRect)
         {
             var state = g.Save();
@@ -2395,7 +2504,7 @@ namespace DynamicIsland
                 g.DrawPath(borderPen, borderPath);
             }
 
-            // ========== 修复：先定义 _searchIconRect，再使用它计算文本区域 ==========
+            // 定义搜索图标区域
             float iconSize = 16 * _dpiScale;
             float iconMargin = 10 * _dpiScale;
             _searchIconRect = new RectangleF(
@@ -2403,9 +2512,8 @@ namespace DynamicIsland
                 _searchBoxRect.Y + (_searchBoxRect.Height - iconSize) / 2,
                 iconSize, iconSize);
 
-            // 绘制搜索文本（白色，确保可见）
             float textX = _searchBoxRect.X + 12 * _dpiScale;
-            float textWidth = _searchIconRect.Left - textX - 8 * _dpiScale;  // 现在 _searchIconRect 已定义
+            float textWidth = _searchIconRect.Left - textX - 8 * _dpiScale;
             var textRect = new RectangleF(textX, _searchBoxRect.Y,
                 textWidth, _searchBoxRect.Height);
 
@@ -2426,9 +2534,9 @@ namespace DynamicIsland
             }
             else
             {
-                // 绘制实际输入的文本（白色，加粗以提升可见性）
+                // 绘制实际输入的文本
                 using (var brush = new SolidBrush(Color.White))
-                using (var font = new Font("Microsoft YaHei", 14 * _dpiScale, FontStyle.Bold, GraphicsUnit.Pixel))
+                using (var font = new Font("Microsoft YaHei", 14 * _dpiScale, FontStyle.Regular, GraphicsUnit.Pixel))
                 {
                     g.DrawString(_searchText, font, brush, textRect, leftFormat);
                 }
@@ -2437,7 +2545,7 @@ namespace DynamicIsland
             // 绘制光标
             if (!string.IsNullOrEmpty(_searchText) && _cursorVisible && _isSearchMode)
             {
-                using (var font = new Font("Microsoft YaHei", 14 * _dpiScale, FontStyle.Bold, GraphicsUnit.Pixel))
+                using (var font = new Font("Microsoft YaHei", 14 * _dpiScale, FontStyle.Regular, GraphicsUnit.Pixel))
                 {
                     string textBeforeCursor = _searchText.Substring(0, Math.Min(_cursorPosition, _searchText.Length));
                     SizeF textSize = g.MeasureString(textBeforeCursor, font, int.MaxValue, leftFormat);
@@ -2486,6 +2594,7 @@ namespace DynamicIsland
 
             g.Restore(state);
         }
+
         private void DrawAnimatedTimeContent(Graphics g, RectangleF islandRect)
         {
             var state = g.Save();
@@ -2971,6 +3080,29 @@ namespace DynamicIsland
                 catch { }
                 m.Result = IntPtr.Zero;
                 return;
+            }
+
+            // 处理输入法相关消息
+            if (_isSearchMode && _immEnabled)
+            {
+                const int WM_IME_STARTCOMPOSITION = 0x010D;
+                const int WM_IME_ENDCOMPOSITION = 0x010E;
+                const int WM_IME_COMPOSITION = 0x010F;
+                const int WM_IME_CHAR = 0x0286;
+
+                if (m.Msg == WM_IME_CHAR)
+                {
+                    // 输入法字符输入
+                    char c = (char)m.WParam;
+                    if (_searchText.Length < 100)
+                    {
+                        _searchText = _searchText.Insert(_cursorPosition, c.ToString());
+                        _cursorPosition++;
+                        RequestRender();
+                    }
+                    m.Result = IntPtr.Zero;
+                    return;
+                }
             }
 
             base.WndProc(ref m);
